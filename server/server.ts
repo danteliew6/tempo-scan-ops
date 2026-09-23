@@ -1,4 +1,4 @@
-import { createApp, analytics, genie, server, serving, lakebase } from '@databricks/appkit';
+import { createApp, analytics, genie, server, lakebase } from '@databricks/appkit';
 import { z } from 'zod';
 
 // Write-back payload: an ops decision on an at-risk SKU x DC (expiry / stockout).
@@ -19,7 +19,9 @@ createApp({
     analytics(),
     genie(),
     server(),
-    serving(),
+    // serving() omitted: this workspace's UC metastore is at its registered-model
+    // quota, so the demand/expiry model can't be served. The Forecast page's live
+    // "what-if" degrades gracefully; the forecast chart + risk worklist read Lakebase.
     lakebase(),
   ],
   // Operational-serving reads: the curated gold layer is synced into Lakebase
