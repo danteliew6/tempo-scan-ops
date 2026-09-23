@@ -157,7 +157,7 @@ export function OverviewPage() {
         <Card className="shadow-sm">
           <CardHeader><CardTitle>Demand by Region (latest day)</CardTitle></CardHeader>
           <CardContent>
-            <BarChart data={region.data ?? []} xKey="region" yKey="demand_units" height={280} />
+            <BarChart data={region.data ?? []} xKey="region" yKey="demand_units" height={280} orientation="horizontal" />
           </CardContent>
         </Card>
         <Card className="shadow-sm">
