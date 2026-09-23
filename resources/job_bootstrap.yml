@@ -1,0 +1,171 @@
+resources:
+  jobs:
+    tempo_bootstrap:
+      name: tempo-bootstrap
+      description: >-
+        One-shot reproduction of the Tempo Scan solution: synthetic data -> DQ
+        pipeline -> UC governance + sovereignty -> metric views -> ML + serving ->
+        serving gold. Run once per workspace after `bundle deploy`. Lakebase synced
+        tables and the Genie space are set up separately (see BUILD.md).
+
+      # Target identifiers flow to every task as --ts-* parameters, which
+      # bootstrap/run.py promotes to TEMPO_* env before tempo_config loads.
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: schema
+          default: ${var.schema}
+        - name: warehouse_id
+          default: ${var.warehouse_id}
+        - name: serving_endpoint
+          default: ${var.serving_endpoint_name}
+        - name: experiment_dir
+          default: ${var.experiment_dir}
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "4"
+        - environment_key: ml
+          spec:
+            client: "4"
+            dependencies:
+              - mlflow
+              - xgboost
+              - optuna
+              - scikit-learn
+              - pandas
+              - numpy
+        - environment_key: docs
+          spec:
+            client: "4"
+            dependencies:
+              - reportlab
+
+      tasks:
+        - task_key: gen_dims
+          environment_key: default
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - gen_dims
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+
+        - task_key: gen_bronze
+          depends_on: [{ task_key: gen_dims }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - gen_bronze
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+
+        - task_key: gen_facts
+          depends_on: [{ task_key: gen_bronze }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - gen_facts
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+
+        - task_key: add_comments
+          depends_on: [{ task_key: gen_facts }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - add_comments
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+
+        - task_key: build_documents
+          depends_on: [{ task_key: gen_dims }]
+          environment_key: docs
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - build_documents
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+
+        - task_key: run_dq_pipeline
+          depends_on: [{ task_key: add_comments }]
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.tempo_dq_pipeline.id}
+            # Full refresh: the bootstrap regenerates (overwrites) bronze_sales_raw each
+            # run, which is a non-append change a streaming source can't consume
+            # incrementally. A full refresh reprocesses from the current bronze and keeps
+            # the bootstrap idempotently re-runnable. (The realtime job stays incremental.)
+            full_refresh: true
+
+        - task_key: apply_governance
+          depends_on: [{ task_key: run_dq_pipeline }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - apply_governance
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+
+        - task_key: create_metric_views
+          depends_on: [{ task_key: run_dq_pipeline }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - create_metric_views
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+
+        - task_key: build_serving_gold
+          depends_on: [{ task_key: run_dq_pipeline }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - build_serving_gold
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+
+        - task_key: train_expiry_risk
+          depends_on: [{ task_key: run_dq_pipeline }]
+          environment_key: ml
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - train_expiry_risk
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+              - --ts-experiment-dir={{job.parameters.experiment_dir}}
+
+        - task_key: stockout_proba
+          depends_on: [{ task_key: train_expiry_risk }]
+          environment_key: ml
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - stockout_proba
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+              - --ts-experiment-dir={{job.parameters.experiment_dir}}
+              - --ts-serving-endpoint={{job.parameters.serving_endpoint}}
+
+        - task_key: train_demand_forecast
+          depends_on: [{ task_key: run_dq_pipeline }]
+          environment_key: ml
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - train_demand_forecast
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+              - --ts-experiment-dir={{job.parameters.experiment_dir}}
+
+      queue:
+        enabled: true
+      max_concurrent_runs: 1

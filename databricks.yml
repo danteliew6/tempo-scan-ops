@@ -1,0 +1,76 @@
+bundle:
+  name: tempo-scan-ops
+
+include:
+  - resources/*.yml
+
+# The bundle root doubles as the app source dir, so keep heavy/generated
+# directories out of the workspace sync (the app is built on-platform).
+sync:
+  exclude:
+    - node_modules
+    - client/dist
+    - dist
+    - build
+    - test-results
+    - playwright-report
+    - .databricks
+    - "**/__pycache__"
+    - "**/*.pyc"
+
+variables:
+  catalog:
+    description: Unity Catalog catalog for all Tempo Scan data and assets
+    default: dante_classic_stable_catalog
+  schema:
+    description: Unity Catalog schema
+    default: tempo_scan_supply_chain
+  warehouse_id:
+    description: SQL Warehouse id used by the app, dashboard, and metric views
+    default: 114b2f7bfa1273b1
+  genie_space_name:
+    description: Genie space display name
+    default: tempo_scan_data
+  serving_endpoint_name:
+    description: Model serving endpoint name (created/updated by the ML stage)
+    default: tempo-demand-forecast
+  experiment_dir:
+    description: MLflow experiment parent directory (workspace-agnostic)
+    default: /Shared/tempo_scan_ml
+  lakebase_project:
+    description: Lakebase Autoscaling project id
+    default: tempo-scan-ops-db
+  lakebase_branch:
+    description: Lakebase branch resource path
+    default: projects/tempo-scan-ops-db/branches/production
+  lakebase_database:
+    description: Lakebase database resource path
+    default: projects/tempo-scan-ops-db/branches/production/databases/databricks-postgres
+  lakebase_catalog:
+    description: UC catalog registered over the Lakebase database (for synced tables)
+    default: tempo_scan_lakebase
+
+targets:
+  # ---- source: the original workspace this solution was built on ----
+  source:
+    default: true
+    workspace:
+      host: https://fevm-dante-classic-stable.cloud.databricks.com
+    # All variable defaults above already match this workspace.
+
+  # ---- replica: a NEW workspace to reproduce the solution in ----
+  # Override host + the variables below (or pass --var on the CLI), then run the
+  # replicate flow in BUILD.md. Everything is parameterized off these values.
+  replica:
+    workspace:
+      host: https://REPLACE-ME.cloud.databricks.com
+    variables:
+      catalog: main
+      schema: tempo_scan_supply_chain
+      warehouse_id: REPLACE-ME
+      # The Genie space is created by the bundle (resources/genie.yml) and the app
+      # binds to it automatically — no manual import or id wiring needed.
+      lakebase_project: tempo-scan-ops-db
+      lakebase_branch: projects/tempo-scan-ops-db/branches/production
+      lakebase_database: projects/tempo-scan-ops-db/branches/production/databases/databricks-postgres
+      lakebase_catalog: tempo_scan_lakebase

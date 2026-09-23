@@ -1,0 +1,11 @@
+resources:
+  genie_spaces:
+    tempo_genie:
+      title: ${var.genie_space_name}
+      description: "Tempo Scan Data Assistant — governed NL Q&A (EN + Bahasa) over the pharma + consumer-health supply chain"
+      # Home dir is guaranteed to exist; parent_path is immutable (changing it recreates the space).
+      parent_path: /Workspace/Users/${workspace.current_user.userName}
+      warehouse_id: ${var.warehouse_id}
+      # The serialized space body (version/config/data_sources/instructions) is inlined at deploy.
+      # data_sources embed catalog.schema — retargeted for a replica by bootstrap/render_assets.py.
+      file_path: ../genie/genie_agent.json

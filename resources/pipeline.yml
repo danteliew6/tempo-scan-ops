@@ -1,0 +1,13 @@
+resources:
+  pipelines:
+    tempo_dq_pipeline:
+      name: tempo_dq_pipeline
+      catalog: ${var.catalog}
+      target: ${var.schema}
+      serverless: true
+      photon: true
+      channel: CURRENT
+      continuous: false
+      libraries:
+        - glob:
+            include: ../governance/pipeline/**

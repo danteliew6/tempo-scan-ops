@@ -1,0 +1,76 @@
+resources:
+  jobs:
+    tempo_realtime_ingest:
+      name: tempo-realtime-ingest
+      description: >-
+        Near-real-time synthetic ingestion: append a fresh micro-batch of
+        current-time sell-through orders -> bronze, run the DQ pipeline, rebuild
+        serving gold, then refresh the Lakebase synced tables. Schedule is PAUSED
+        by default; unpause to run every 10 minutes.
+
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: schema
+          default: ${var.schema}
+        - name: lakebase_catalog
+          default: ${var.lakebase_catalog}
+        - name: batch_size
+          default: "400"
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "4"
+        - environment_key: sdk
+          spec:
+            client: "4"
+            dependencies:
+              - databricks-sdk
+
+      tasks:
+        - task_key: gen_stream_batch
+          environment_key: default
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - gen_stream_batch
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+              - "{{job.parameters.batch_size}}"
+
+        - task_key: run_dq_pipeline
+          depends_on: [{ task_key: gen_stream_batch }]
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.tempo_dq_pipeline.id}
+            full_refresh: false
+
+        - task_key: rebuild_serving_gold
+          depends_on: [{ task_key: run_dq_pipeline }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - rebuild_serving_gold
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+
+        - task_key: refresh_synced_tables
+          depends_on: [{ task_key: rebuild_serving_gold }]
+          environment_key: sdk
+          spark_python_task:
+            python_file: ../bootstrap/run.py
+            parameters:
+              - refresh_synced_tables
+              - --ts-catalog={{job.parameters.catalog}}
+              - --ts-schema={{job.parameters.schema}}
+              - --ts-lakebase-catalog={{job.parameters.lakebase_catalog}}
+
+      schedule:
+        quartz_cron_expression: "0 */10 * * * ?"
+        timezone_id: Asia/Jakarta
+        pause_status: PAUSED
+
+      queue:
+        enabled: true
+      max_concurrent_runs: 1

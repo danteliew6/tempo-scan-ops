@@ -1,0 +1,16 @@
+.DS_Store
+node_modules/
+client/dist/
+dist/
+build/
+.env
+.databricks/
+.smoke-test/
+test-results/
+playwright-report/
+
+# Python data-journey artifacts
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

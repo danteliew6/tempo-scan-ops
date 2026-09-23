@@ -1,0 +1,45 @@
+@import "@databricks/appkit-ui/styles.css";
+
+/* ===== Tempo Scan whitelabel theme =====
+   Gold (#A8842A) primary on clean white / deep neutral ink.
+   Molecule to Shelf, Governed in Indonesia. Gold-led, not blue. */
+:root {
+  --radius: 0.625rem;
+  /* Tempo Scan gold as primary */
+  --primary: oklch(0.60 0.10 88);
+  --primary-foreground: oklch(0.99 0 0);
+  --ring: oklch(0.60 0.10 88);
+  --accent: oklch(0.96 0.03 90);
+  --accent-foreground: oklch(0.34 0.06 80);
+  /* chart palette: gold-led categorical set with clear contrast + semantic risk tones */
+  --chart-1: oklch(0.62 0.11 88);  /* gold — primary series */
+  --chart-2: oklch(0.45 0.06 245); /* deep slate-blue — contrast */
+  --chart-3: oklch(0.60 0.09 190); /* teal */
+  --chart-4: oklch(0.72 0.15 60);  /* amber — watch */
+  --chart-5: oklch(0.56 0.20 27);  /* red — risk */
+  /* Tempo Scan brand tokens for custom UI */
+  --ts-gold: #a8842a;
+  --ts-gold-deep: #6b5518;
+  --ts-gold-bright: #c9a54a;
+  --ts-ink: #1c1917;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --primary: oklch(0.74 0.12 90);
+    --primary-foreground: oklch(0.16 0.02 80);
+    --ring: oklch(0.74 0.12 90);
+    --accent: oklch(0.32 0.05 85);
+    --accent-foreground: oklch(0.95 0.03 90);
+    --chart-1: oklch(0.76 0.12 90);
+    --chart-2: oklch(0.62 0.09 240);
+    --chart-3: oklch(0.68 0.09 190);
+    --chart-4: oklch(0.78 0.15 65);
+    --chart-5: oklch(0.66 0.19 28);
+  }
+}
+
+/* Tempo Scan gradient header bar — deep gold ink so white text stays legible */
+.ts-header {
+  background: linear-gradient(90deg, var(--ts-gold-deep) 0%, var(--ts-gold) 100%);
+}

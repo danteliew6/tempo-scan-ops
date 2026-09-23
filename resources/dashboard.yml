@@ -1,0 +1,9 @@
+resources:
+  dashboards:
+    tempo_ops_dashboard:
+      display_name: "Tempo Scan Ops"
+      file_path: ../dashboard/tempo_ops_dashboard.json
+      warehouse_id: ${var.warehouse_id}
+      # Dataset queries use unqualified table names; they resolve against the
+      # target schema. For a replica with a differently-named catalog, set the
+      # warehouse default or retarget (see replicate.sh / BUILD.md).

@@ -1,0 +1,12 @@
+command: ['npm', 'run', 'start']
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: DATABRICKS_GENIE_SPACE_ID
+    valueFrom: genie-space
+  # DATABRICKS_SERVING_ENDPOINT_NAME omitted — see resources/app.yml (metastore model
+  # quota blocks the serving endpoint; the live what-if degrades gracefully). Re-add:
+  #   - name: DATABRICKS_SERVING_ENDPOINT_NAME
+  #     valueFrom: serving-endpoint
+  - name: LAKEBASE_ENDPOINT
+    valueFrom: postgres

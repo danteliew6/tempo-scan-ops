@@ -1,0 +1,394 @@
+{
+  "datasets": [
+    {
+      "name": "ds_sales",
+      "displayName": "Sell-through",
+      "queryLines": [
+        "SELECT to_date(t.order_ts) AS sales_date, hour(t.order_ts) AS sales_hour, ",
+        "       t.region AS region, t.province AS province, t.city AS city, ",
+        "       t.division AS division, t.brand AS brand, t.category AS category, ",
+        "       t.channel AS channel, t.status AS status, t.promo_flag AS promo_flag, ",
+        "       t.units_ordered AS units_ordered, t.units_fulfilled AS units_fulfilled, ",
+        "       t.net_idr AS net_idr, t.gross_idr AS gross_idr ",
+        "FROM fact_sales t"
+      ],
+      "columns": [
+        {"displayName": "Total Orders", "description": "Count of outlet orders", "expression": "COUNT(1)"},
+        {"displayName": "Units Ordered", "description": "Total units ordered", "expression": "SUM(`units_ordered`)"},
+        {"displayName": "Net Revenue Bn IDR", "description": "Net sell-through revenue in billions of IDR", "expression": "SUM(`net_idr`)/1000000000.0"},
+        {"displayName": "Revenue At Risk Bn IDR", "description": "Net revenue on backorder/partial/cancelled orders (Bn IDR)", "expression": "SUM(CASE WHEN `status` IN ('backorder','partial','cancelled') THEN `net_idr` ELSE 0 END)/1000000000.0"},
+        {"displayName": "Fill Rate", "description": "Units fulfilled / units ordered", "expression": "SUM(`units_fulfilled`)*1.0/NULLIF(SUM(`units_ordered`),0)"},
+        {"displayName": "Stockout Order Rate", "description": "Backorder or partial orders / all orders", "expression": "SUM(CASE WHEN `status` IN ('backorder','partial') THEN 1 ELSE 0 END)*1.0/NULLIF(COUNT(1),0)"},
+        {"displayName": "Cancellation Rate", "description": "Cancelled orders / all orders", "expression": "SUM(CASE WHEN `status`='cancelled' THEN 1 ELSE 0 END)*1.0/NULLIF(COUNT(1),0)"}
+      ]
+    },
+    {
+      "name": "ds_inventory",
+      "displayName": "Inventory risk",
+      "queryLines": [
+        "SELECT to_date(i.reading_date) AS reading_date, i.dc_id AS dc_id, ",
+        "       i.product_id AS product_id, p.product_name AS product_name, ",
+        "       i.brand AS brand, i.division AS division, i.region AS region, ",
+        "       i.on_hand_units AS on_hand_units, i.days_of_supply AS days_of_supply, ",
+        "       i.days_to_expiry AS days_to_expiry, i.at_risk_expiry_units AS at_risk_expiry_units, ",
+        "       i.avg_daily_demand AS avg_daily_demand, i.stockout_flag AS stockout_flag, ",
+        "       i.expiry_risk_score AS expiry_risk_score ",
+        "FROM fact_inventory i ",
+        "LEFT JOIN dim_product p ON i.product_id = p.product_id"
+      ],
+      "columns": [
+        {"displayName": "Readings", "description": "DC x product x day readings", "expression": "COUNT(1)"},
+        {"displayName": "Stockout Rate", "description": "Share of DC-SKU-days in stockout", "expression": "SUM(`stockout_flag`)*1.0/NULLIF(COUNT(1),0)"},
+        {"displayName": "Avg Days Of Supply", "description": "Average days of supply", "expression": "AVG(`days_of_supply`)"},
+        {"displayName": "Avg Expiry Risk", "description": "Average expiry risk score (0-1)", "expression": "AVG(`expiry_risk_score`)"},
+        {"displayName": "At Risk Expiry Units", "description": "Units exposed to expiry write-off", "expression": "SUM(`at_risk_expiry_units`)"},
+        {"displayName": "SKUs At Expiry Risk", "description": "Distinct DC-SKU with expiry risk > 0.7", "expression": "COUNT(DISTINCT CASE WHEN `expiry_risk_score` > 0.7 THEN concat(`dc_id`,'|',`product_id`) END)"}
+      ]
+    },
+    {
+      "name": "ds_risk_worklist",
+      "displayName": "At-risk SKU worklist",
+      "queryLines": [
+        "SELECT p.product_name AS product_name, i.brand AS brand, i.division AS division, ",
+        "       i.dc_id AS dc_id, i.region AS region, ",
+        "       i.expiry_risk_score AS expiry_risk_score, i.days_to_expiry AS days_to_expiry, ",
+        "       i.at_risk_expiry_units AS at_risk_expiry_units, i.on_hand_units AS on_hand_units, ",
+        "       i.days_of_supply AS days_of_supply ",
+        "FROM fact_inventory i ",
+        "LEFT JOIN dim_product p ON i.product_id = p.product_id ",
+        "WHERE i.reading_date = (SELECT MAX(reading_date) FROM fact_inventory) ",
+        "  AND i.expiry_risk_score > 0.7 ",
+        "ORDER BY i.expiry_risk_score DESC LIMIT 50"
+      ]
+    },
+    {
+      "name": "ds_dc_map",
+      "displayName": "DC demand & stockout",
+      "queryLines": [
+        "SELECT dc.dc_id AS dc_id, dc.dc_name AS dc_name, dc.city AS city, ",
+        "       dc.region AS region, dc.lat AS lat, dc.lng AS lng, ",
+        "       COALESCE(s.net_idr, 0) AS net_idr, COALESCE(s.units_ordered, 0) AS units_ordered, ",
+        "       COALESCE(i.stockout_rate, 0) AS stockout_rate ",
+        "FROM dim_distribution_center dc ",
+        "LEFT JOIN (SELECT dc_id, SUM(net_idr) AS net_idr, SUM(units_ordered) AS units_ordered ",
+        "           FROM fact_sales GROUP BY dc_id) s ON dc.dc_id = s.dc_id ",
+        "LEFT JOIN (SELECT dc_id, SUM(stockout_flag)*1.0/NULLIF(COUNT(1),0) AS stockout_rate ",
+        "           FROM fact_inventory GROUP BY dc_id) i ON dc.dc_id = i.dc_id"
+      ]
+    },
+    {
+      "name": "ds_forecast",
+      "displayName": "National demand forecast",
+      "queryLines": [
+        "WITH actuals AS ( ",
+        "  SELECT DATE_TRUNC('DAY', order_ts) AS sales_date, SUM(units_ordered) AS units ",
+        "  FROM fact_sales ",
+        "  WHERE DATE_TRUNC('DAY', order_ts) < DATE_TRUNC('DAY', current_timestamp()) ",
+        "  GROUP BY 1 ",
+        "), ",
+        "dates AS (SELECT MAX(sales_date) AS max_d, MIN(sales_date) AS min_d FROM actuals), ",
+        "forecast AS ( ",
+        "  SELECT sales_date, units_forecast, units_upper, units_lower, CAST(NULL AS DOUBLE) AS units ",
+        "  FROM AI_FORECAST( ",
+        "    TABLE(actuals), ",
+        "    horizon    => (SELECT max_d + MAKE_DT_INTERVAL(14, 0, 0, 0) FROM dates), ",
+        "    time_col   => 'sales_date', ",
+        "    value_col  => 'units', ",
+        "    parameters => '{\"global_floor\": 0}' ",
+        "  ) ",
+        "), ",
+        "bridge AS ( ",
+        "  SELECT a.sales_date, ",
+        "         CAST(a.units AS DOUBLE) AS units_forecast, ",
+        "         CAST(a.units AS DOUBLE) AS units_upper, ",
+        "         CAST(a.units AS DOUBLE) AS units_lower, ",
+        "         CAST(a.units AS DOUBLE) AS units ",
+        "  FROM actuals a JOIN dates d ON a.sales_date = d.max_d ",
+        ") ",
+        "SELECT sales_date, CAST(NULL AS DOUBLE) AS units_forecast, CAST(NULL AS DOUBLE) AS units_upper, CAST(NULL AS DOUBLE) AS units_lower, CAST(units AS DOUBLE) AS units FROM actuals ",
+        "UNION ALL SELECT sales_date, units_forecast, units_upper, units_lower, units FROM bridge ",
+        "UNION ALL SELECT sales_date, units_forecast, units_upper, units_lower, units FROM forecast"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "national",
+      "displayName": "National Sell-Through",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "national_header",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# 💊 Tempo Scan — Molecule to Shelf, Governed in Indonesia\n",
+                "National sell-through across PT Tempo's distribution network — demand, fill rate, and **revenue at risk from stockouts**. **Watch Jawa and Sumatera**: a recent flu-season surge in OTC analgesics (Bodrex, Oskadon, Bodrexin, Hemaviton) is driving backorders and lost revenue. Use the Filters page to slice by date, region and division."
+              ]
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "kpi_net_revenue",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_sales", "fields": [{"name": "measure(Net Revenue Bn IDR)", "expression": "MEASURE(`Net Revenue Bn IDR`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(Net Revenue Bn IDR)", "displayName": "Net Revenue (Bn IDR)", "format": {"type": "number", "decimalPlaces": {"type": "exact", "places": 2}}}}, "frame": {"title": "Net Revenue (Bn IDR)", "showTitle": true}}
+          },
+          "position": {"x": 0, "y": 2, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi_fill_rate",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_sales", "fields": [{"name": "measure(Fill Rate)", "expression": "MEASURE(`Fill Rate`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(Fill Rate)", "displayName": "Fill Rate", "format": {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 1}}}}, "frame": {"title": "National Fill Rate", "showTitle": true}}
+          },
+          "position": {"x": 3, "y": 2, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi_rev_at_risk",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_sales", "fields": [{"name": "measure(Revenue At Risk Bn IDR)", "expression": "MEASURE(`Revenue At Risk Bn IDR`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(Revenue At Risk Bn IDR)", "displayName": "Revenue at Risk (Bn IDR)", "format": {"type": "number", "decimalPlaces": {"type": "exact", "places": 2}}, "color": {"hex": "#C85C5C"}}}, "frame": {"title": "Revenue at Risk (Bn IDR)", "showTitle": true}}
+          },
+          "position": {"x": 6, "y": 2, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi_stockout_rate",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_sales", "fields": [{"name": "measure(Stockout Order Rate)", "expression": "MEASURE(`Stockout Order Rate`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(Stockout Order Rate)", "displayName": "Stockout Order Rate", "format": {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 1}}, "color": {"hex": "#C85C5C"}}}, "frame": {"title": "Stockout Order Rate", "showTitle": true}}
+          },
+          "position": {"x": 9, "y": 2, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "revenue_vs_risk",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_sales", "fields": [{"name": "daily(sales_date)", "expression": "DATE_TRUNC(\"DAY\", `sales_date`)"}, {"name": "measure(Net Revenue Bn IDR)", "expression": "MEASURE(`Net Revenue Bn IDR`)"}, {"name": "measure(Revenue At Risk Bn IDR)", "expression": "MEASURE(`Revenue At Risk Bn IDR`)"}], "disaggregated": false}}],
+            "spec": {"version": 1, "widgetType": "combo", "frame": {"title": "Daily Net Revenue vs Revenue at Risk (Bn IDR)", "showTitle": true}, "encodings": {"x": {"fieldName": "daily(sales_date)", "scale": {"type": "temporal"}, "displayName": "Date"}, "y": {"scale": {"type": "quantitative"}, "primary": {"fields": [{"fieldName": "measure(Net Revenue Bn IDR)", "displayName": "Net Revenue (Bn IDR)"}]}, "secondary": {"fields": [{"fieldName": "measure(Revenue At Risk Bn IDR)", "displayName": "Revenue at Risk (Bn IDR)"}]}}, "label": {"show": false}}}
+          },
+          "position": {"x": 0, "y": 5, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "fill_rate_trend",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_sales", "fields": [{"name": "daily(sales_date)", "expression": "DATE_TRUNC(\"DAY\", `sales_date`)"}, {"name": "measure(Fill Rate)", "expression": "MEASURE(`Fill Rate`)"}, {"name": "region", "expression": "`region`"}], "disaggregated": false}}],
+            "spec": {"version": 3, "widgetType": "line", "frame": {"title": "Daily Fill Rate by Region", "showTitle": true}, "encodings": {"x": {"fieldName": "daily(sales_date)", "scale": {"type": "temporal"}, "displayName": "Date"}, "y": {"fieldName": "measure(Fill Rate)", "scale": {"type": "quantitative"}, "displayName": "Fill Rate", "format": {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 0}}}, "color": {"fieldName": "region", "scale": {"type": "categorical"}, "displayName": "Region"}}}
+          },
+          "position": {"x": 6, "y": 5, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "demand_by_division",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_sales", "fields": [{"name": "division", "expression": "`division`"}, {"name": "measure(Units Ordered)", "expression": "MEASURE(`Units Ordered`)"}], "disaggregated": false}}],
+            "spec": {"version": 3, "widgetType": "bar", "frame": {"title": "Demand (Units Ordered) by Division", "showTitle": true}, "encodings": {"x": {"fieldName": "division", "scale": {"type": "categorical"}, "displayName": "Division"}, "y": {"fieldName": "measure(Units Ordered)", "scale": {"type": "quantitative"}, "displayName": "Units Ordered"}, "color": {"fieldName": "division", "scale": {"type": "categorical"}, "displayName": "Division"}}}
+          },
+          "position": {"x": 0, "y": 10, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "revenue_by_region",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_sales", "fields": [{"name": "region", "expression": "`region`"}, {"name": "measure(Net Revenue Bn IDR)", "expression": "MEASURE(`Net Revenue Bn IDR`)"}], "disaggregated": false}}],
+            "spec": {"version": 3, "widgetType": "bar", "frame": {"title": "Net Revenue by Region (Bn IDR)", "showTitle": true}, "encodings": {"x": {"fieldName": "region", "scale": {"type": "categorical"}, "displayName": "Region"}, "y": {"fieldName": "measure(Net Revenue Bn IDR)", "scale": {"type": "quantitative"}, "displayName": "Net Revenue (Bn IDR)"}, "color": {"fieldName": "region", "scale": {"type": "categorical"}, "displayName": "Region"}}}
+          },
+          "position": {"x": 6, "y": 10, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "dc_map",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_dc_map", "fields": [{"name": "lat", "expression": "`lat`"}, {"name": "lng", "expression": "`lng`"}, {"name": "dc_name", "expression": "`dc_name`"}, {"name": "sum(units_ordered)", "expression": "SUM(`units_ordered`)"}, {"name": "avg(stockout_rate)", "expression": "AVG(`stockout_rate`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "symbol-map", "frame": {"title": "Distribution Centers — Demand (size) & Stockout Rate (color)", "showTitle": true}, "encodings": {"coordinates": {"latitude": {"fieldName": "lat"}, "longitude": {"fieldName": "lng"}}, "color": {"fieldName": "avg(stockout_rate)", "scale": {"type": "quantitative", "colorRamp": {"mode": "custom-sequential", "colors": {"start": "#4FA1A0", "end": "#C85C5C"}}}, "displayName": "Stockout Rate"}, "size": {"fieldName": "sum(units_ordered)", "scale": {"type": "quantitative"}, "displayName": "Units Ordered"}}, "mark": {"opacity": 0.75}}
+          },
+          "position": {"x": 0, "y": 15, "width": 8, "height": 6}
+        },
+        {
+          "widget": {
+            "name": "order_outcome_mix",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_sales", "fields": [{"name": "measure(Total Orders)", "expression": "MEASURE(`Total Orders`)"}, {"name": "status", "expression": "`status`"}], "disaggregated": false}}],
+            "spec": {"version": 3, "widgetType": "pie", "frame": {"title": "Order Outcome Mix", "showTitle": true}, "encodings": {"angle": {"fieldName": "measure(Total Orders)", "scale": {"type": "quantitative"}, "displayName": "Orders"}, "color": {"fieldName": "status", "scale": {"type": "categorical", "mappings": [{"value": "fulfilled", "color": "#4FA1A0"}, {"value": "partial", "color": "#D4A73C"}, {"value": "backorder", "color": "#C85C5C"}, {"value": "cancelled", "color": "#8E5AA6"}]}, "displayName": "Status"}, "label": {"show": true}}}
+          },
+          "position": {"x": 8, "y": 15, "width": 4, "height": 6}
+        }
+      ]
+    },
+    {
+      "name": "inventory_risk",
+      "displayName": "Inventory & Expiry Risk",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "inv_header",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# 📦 Inventory Health & Expiry Write-off Risk\n",
+                "DC × SKU × day inventory position across PT Tempo's network. **Stockout rate spikes in Jawa and Sumatera** during the flu-season surge, while a set of short-shelf-life SKUs over-stocked in specific DCs trend toward expiry write-off (`expiry_risk_score` > 0.7). The worklist below is the pre-positioning + redistribution action list."
+              ]
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "kpi_skus_at_risk",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_inventory", "fields": [{"name": "measure(SKUs At Expiry Risk)", "expression": "MEASURE(`SKUs At Expiry Risk`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(SKUs At Expiry Risk)", "displayName": "SKUs at Expiry Risk", "color": {"hex": "#C85C5C"}}}, "frame": {"title": "SKU×DC at Expiry Risk (>0.7)", "showTitle": true}}
+          },
+          "position": {"x": 0, "y": 2, "width": 4, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi_at_risk_units",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_inventory", "fields": [{"name": "measure(At Risk Expiry Units)", "expression": "MEASURE(`At Risk Expiry Units`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(At Risk Expiry Units)", "displayName": "At-Risk Expiry Units", "format": {"type": "number", "decimalPlaces": {"type": "exact", "places": 0}}}}, "frame": {"title": "Units Exposed to Expiry", "showTitle": true}}
+          },
+          "position": {"x": 4, "y": 2, "width": 4, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi_days_supply",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_inventory", "fields": [{"name": "measure(Avg Days Of Supply)", "expression": "MEASURE(`Avg Days Of Supply`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(Avg Days Of Supply)", "displayName": "Avg Days of Supply", "format": {"type": "number", "decimalPlaces": {"type": "exact", "places": 1}}}}, "frame": {"title": "Avg Days of Supply", "showTitle": true}}
+          },
+          "position": {"x": 8, "y": 2, "width": 4, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "stockout_trend",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_inventory", "fields": [{"name": "daily(reading_date)", "expression": "DATE_TRUNC(\"DAY\", `reading_date`)"}, {"name": "measure(Stockout Rate)", "expression": "MEASURE(`Stockout Rate`)"}, {"name": "region", "expression": "`region`"}], "disaggregated": false}}],
+            "spec": {"version": 3, "widgetType": "line", "frame": {"title": "Daily Stockout Rate by Region", "showTitle": true}, "encodings": {"x": {"fieldName": "daily(reading_date)", "scale": {"type": "temporal"}, "displayName": "Date"}, "y": {"fieldName": "measure(Stockout Rate)", "scale": {"type": "quantitative"}, "displayName": "Stockout Rate", "format": {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 0}}}, "color": {"fieldName": "region", "scale": {"type": "categorical"}, "displayName": "Region"}}}
+          },
+          "position": {"x": 0, "y": 5, "width": 12, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "expiry_by_division",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_inventory", "fields": [{"name": "division", "expression": "`division`"}, {"name": "measure(Avg Expiry Risk)", "expression": "MEASURE(`Avg Expiry Risk`)"}], "disaggregated": false}}],
+            "spec": {"version": 3, "widgetType": "bar", "frame": {"title": "Avg Expiry Risk Score by Division", "showTitle": true}, "encodings": {"x": {"fieldName": "division", "scale": {"type": "categorical"}, "displayName": "Division"}, "y": {"fieldName": "measure(Avg Expiry Risk)", "scale": {"type": "quantitative"}, "displayName": "Avg Expiry Risk"}, "color": {"fieldName": "division", "scale": {"type": "categorical"}, "displayName": "Division"}}}
+          },
+          "position": {"x": 0, "y": 10, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "stockout_by_region",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_inventory", "fields": [{"name": "region", "expression": "`region`"}, {"name": "measure(Stockout Rate)", "expression": "MEASURE(`Stockout Rate`)"}], "disaggregated": false}}],
+            "spec": {"version": 3, "widgetType": "bar", "frame": {"title": "Stockout Rate by Region", "showTitle": true}, "encodings": {"x": {"fieldName": "region", "scale": {"type": "categorical"}, "displayName": "Region"}, "y": {"fieldName": "measure(Stockout Rate)", "scale": {"type": "quantitative"}, "displayName": "Stockout Rate", "format": {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 0}}}, "color": {"fieldName": "region", "scale": {"type": "categorical"}, "displayName": "Region"}}}
+          },
+          "position": {"x": 6, "y": 10, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "at_risk_worklist",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_risk_worklist", "fields": [{"name": "product_name", "expression": "`product_name`"}, {"name": "brand", "expression": "`brand`"}, {"name": "division", "expression": "`division`"}, {"name": "dc_id", "expression": "`dc_id`"}, {"name": "region", "expression": "`region`"}, {"name": "expiry_risk_score", "expression": "`expiry_risk_score`"}, {"name": "days_to_expiry", "expression": "`days_to_expiry`"}, {"name": "at_risk_expiry_units", "expression": "`at_risk_expiry_units`"}, {"name": "on_hand_units", "expression": "`on_hand_units`"}, {"name": "days_of_supply", "expression": "`days_of_supply`"}], "disaggregated": true}}],
+            "spec": {"version": 2, "widgetType": "table", "frame": {"title": "Top At-Risk SKUs (Expiry) — latest reading", "showTitle": true}, "encodings": {"columns": [{"fieldName": "product_name", "displayName": "Product"}, {"fieldName": "brand", "displayName": "Brand"}, {"fieldName": "division", "displayName": "Division"}, {"fieldName": "dc_id", "displayName": "DC"}, {"fieldName": "region", "displayName": "Region"}, {"fieldName": "expiry_risk_score", "displayName": "Expiry Risk", "format": {"type": "number", "decimalPlaces": {"type": "exact", "places": 2}}}, {"fieldName": "days_to_expiry", "displayName": "Days to Expiry"}, {"fieldName": "at_risk_expiry_units", "displayName": "At-Risk Units"}, {"fieldName": "on_hand_units", "displayName": "On Hand"}, {"fieldName": "days_of_supply", "displayName": "Days of Supply", "format": {"type": "number", "decimalPlaces": {"type": "exact", "places": 1}}}]}}
+          },
+          "position": {"x": 0, "y": 15, "width": 12, "height": 6}
+        }
+      ]
+    },
+    {
+      "name": "forecast",
+      "displayName": "Demand Forecast",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "forecast_header",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# 📈 Demand Forecast — Pre-position Ahead of Demand\n",
+                "National daily demand (units ordered) with a 14-day `AI_FORECAST` projection and confidence band. Demand has weekly, monthly and seasonal (flu) structure by region and division — the forecast feeds pre-positioning so DCs stock ahead of the surge instead of backordering."
+              ]
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "demand_forecast_line",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_forecast", "fields": [{"name": "sales_date", "expression": "`sales_date`"}, {"name": "units", "expression": "`units`"}, {"name": "units_forecast", "expression": "`units_forecast`"}, {"name": "units_upper", "expression": "`units_upper`"}, {"name": "units_lower", "expression": "`units_lower`"}], "disaggregated": true}}],
+            "spec": {"version": 1, "widgetType": "forecast-line", "frame": {"title": "National Daily Demand — Actual + 14-day Forecast", "showTitle": true}, "encodings": {"x": {"fieldName": "sales_date", "scale": {"type": "temporal"}, "displayName": "Date"}, "y": {"scale": {"type": "quantitative"}, "original": {"fieldName": "units", "displayName": "Units Ordered"}, "prediction": {"fieldName": "units_forecast", "displayName": "Forecast"}, "predictionUpper": {"fieldName": "units_upper"}, "predictionLower": {"fieldName": "units_lower"}}}}
+          },
+          "position": {"x": 0, "y": 2, "width": 12, "height": 6}
+        },
+        {
+          "widget": {
+            "name": "demand_div_context",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_sales", "fields": [{"name": "daily(sales_date)", "expression": "DATE_TRUNC(\"DAY\", `sales_date`)"}, {"name": "measure(Units Ordered)", "expression": "MEASURE(`Units Ordered`)"}, {"name": "division", "expression": "`division`"}], "disaggregated": false}}],
+            "spec": {"version": 3, "widgetType": "line", "frame": {"title": "Daily Units Ordered by Division", "showTitle": true}, "encodings": {"x": {"fieldName": "daily(sales_date)", "scale": {"type": "temporal"}, "displayName": "Date"}, "y": {"fieldName": "measure(Units Ordered)", "scale": {"type": "quantitative"}, "displayName": "Units Ordered"}, "color": {"fieldName": "division", "scale": {"type": "categorical"}, "displayName": "Division"}}}
+          },
+          "position": {"x": 0, "y": 8, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "demand_region_context",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_sales", "fields": [{"name": "region", "expression": "`region`"}, {"name": "measure(Units Ordered)", "expression": "MEASURE(`Units Ordered`)"}], "disaggregated": false}}],
+            "spec": {"version": 3, "widgetType": "bar", "frame": {"title": "Units Ordered by Region", "showTitle": true}, "encodings": {"x": {"fieldName": "region", "scale": {"type": "categorical"}, "displayName": "Region"}, "y": {"fieldName": "measure(Units Ordered)", "scale": {"type": "quantitative"}, "displayName": "Units Ordered"}, "color": {"fieldName": "region", "scale": {"type": "categorical"}, "displayName": "Region"}}}
+          },
+          "position": {"x": 6, "y": 8, "width": 6, "height": 5}
+        }
+      ]
+    },
+    {
+      "name": "filters",
+      "displayName": "Filters",
+      "pageType": "PAGE_TYPE_GLOBAL_FILTERS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "filter_date",
+            "queries": [
+              {"name": "q_sales_date", "query": {"datasetName": "ds_sales", "fields": [{"name": "sales_date", "expression": "`sales_date`"}], "disaggregated": false}},
+              {"name": "q_inv_date", "query": {"datasetName": "ds_inventory", "fields": [{"name": "reading_date", "expression": "`reading_date`"}], "disaggregated": false}}
+            ],
+            "spec": {"version": 2, "widgetType": "filter-date-range-picker", "encodings": {"fields": [{"fieldName": "sales_date", "queryName": "q_sales_date"}, {"fieldName": "reading_date", "queryName": "q_inv_date"}]}, "frame": {"title": "Date Range", "showTitle": true}}
+          },
+          "position": {"x": 0, "y": 0, "width": 4, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "filter_region",
+            "queries": [
+              {"name": "q_sales_region", "query": {"datasetName": "ds_sales", "fields": [{"name": "region", "expression": "`region`"}], "disaggregated": false}},
+              {"name": "q_inv_region", "query": {"datasetName": "ds_inventory", "fields": [{"name": "region", "expression": "`region`"}], "disaggregated": false}},
+              {"name": "q_dc_region", "query": {"datasetName": "ds_dc_map", "fields": [{"name": "region", "expression": "`region`"}], "disaggregated": false}}
+            ],
+            "spec": {"version": 2, "widgetType": "filter-multi-select", "encodings": {"fields": [{"fieldName": "region", "queryName": "q_sales_region", "displayName": "Region"}, {"fieldName": "region", "queryName": "q_inv_region"}, {"fieldName": "region", "queryName": "q_dc_region"}]}, "frame": {"title": "Region", "showTitle": true}}
+          },
+          "position": {"x": 4, "y": 0, "width": 4, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "filter_division",
+            "queries": [
+              {"name": "q_sales_div", "query": {"datasetName": "ds_sales", "fields": [{"name": "division", "expression": "`division`"}], "disaggregated": false}},
+              {"name": "q_inv_div", "query": {"datasetName": "ds_inventory", "fields": [{"name": "division", "expression": "`division`"}], "disaggregated": false}}
+            ],
+            "spec": {"version": 2, "widgetType": "filter-multi-select", "encodings": {"fields": [{"fieldName": "division", "queryName": "q_sales_div", "displayName": "Division"}, {"fieldName": "division", "queryName": "q_inv_div"}]}, "frame": {"title": "Division", "showTitle": true}}
+          },
+          "position": {"x": 8, "y": 0, "width": 4, "height": 2}
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {"light": "#FCFBF7", "dark": "#201C13"},
+      "widgetBackgroundColor": {"light": "#FFFFFF", "dark": "#17140E"},
+      "widgetBorderColor": {"light": "#FFFFFF", "dark": "#17140E"},
+      "fontColor": {"light": "#1A1712", "dark": "#ECE7DC"},
+      "selectionColor": {"light": "#A8842A", "dark": "#D4A73C"},
+      "visualizationColors": ["#A8842A", "#D4A73C", "#E08A4B", "#C85C5C", "#8E5AA6", "#3B6E8F", "#4FA1A0"],
+      "widgetHeaderAlignment": "LEFT"
+    },
+    "genieSpace": {
+      "isEnabled": true,
+      "overrideId": "01f1b70a57081869baff9dd51d20a7d9",
+      "enablementMode": "ENABLED"
+    }
+  }
+}

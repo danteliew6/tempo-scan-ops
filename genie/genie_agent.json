@@ -1,0 +1,191 @@
+{
+  "version": 2,
+  "config": {
+    "sample_questions": [
+      {
+        "id": "10000000000000000000000000000001",
+        "question": [
+          "What was total net revenue and fill rate by region over the last 30 days?"
+        ]
+      },
+      {
+        "id": "10000000000000000000000000000002",
+        "question": [
+          "Which regions had the highest stockout rate last month?"
+        ]
+      },
+      {
+        "id": "10000000000000000000000000000003",
+        "question": [
+          "How much revenue is at risk from backorders and partial fulfillment in the last 30 days, by division?"
+        ]
+      },
+      {
+        "id": "10000000000000000000000000000004",
+        "question": [
+          "Which SKUs are at risk of expiry?"
+        ]
+      },
+      {
+        "id": "10000000000000000000000000000005",
+        "question": [
+          "Show demand (units ordered) by brand for OTC analgesics during flu season in Jawa and Sumatera."
+        ]
+      },
+      {
+        "id": "10000000000000000000000000000006",
+        "question": [
+          "Berapa tingkat pemenuhan untuk produk OTC di Jawa?"
+        ]
+      },
+      {
+        "id": "10000000000000000000000000000007",
+        "question": [
+          "Wilayah mana yang memiliki tingkat kehabisan stok tertinggi bulan lalu?"
+        ]
+      },
+      {
+        "id": "10000000000000000000000000000008",
+        "question": [
+          "SKU mana yang berisiko kedaluwarsa di setiap pusat distribusi?"
+        ]
+      },
+      {
+        "id": "10000000000000000000000000000009",
+        "question": [
+          "Berapa total pendapatan bersih dan pendapatan yang berisiko akibat kehabisan stok per divisi bulan ini?"
+        ]
+      }
+    ]
+  },
+  "data_sources": {
+    "tables": [
+      {
+        "identifier": "dante_classic_stable_catalog.tempo_scan_supply_chain.dim_distribution_center"
+      },
+      {
+        "identifier": "dante_classic_stable_catalog.tempo_scan_supply_chain.dim_outlet"
+      },
+      {
+        "identifier": "dante_classic_stable_catalog.tempo_scan_supply_chain.dim_product"
+      },
+      {
+        "identifier": "dante_classic_stable_catalog.tempo_scan_supply_chain.fact_inventory"
+      },
+      {
+        "identifier": "dante_classic_stable_catalog.tempo_scan_supply_chain.fact_sales"
+      }
+    ]
+  },
+  "instructions": {
+    "example_question_sqls": [
+      {
+        "id": "20000000000000000000000000000001",
+        "question": [
+          "Net revenue and fill rate by region over the last 30 days"
+        ],
+        "sql": [
+          "SELECT region,\n",
+          "       SUM(net_idr) AS net_revenue_idr,\n",
+          "       ROUND(SUM(units_fulfilled) * 1.0 / NULLIF(SUM(units_ordered), 0), 3) AS fill_rate\n",
+          "FROM dante_classic_stable_catalog.tempo_scan_supply_chain.fact_sales\n",
+          "WHERE to_date(order_ts) >= date_sub(current_date(), 30)\n",
+          "GROUP BY region ORDER BY net_revenue_idr DESC"
+        ]
+      },
+      {
+        "id": "20000000000000000000000000000002",
+        "question": [
+          "Stockout rate by region last month"
+        ],
+        "sql": [
+          "SELECT region,\n",
+          "       ROUND(SUM(stockout_flag) * 1.0 / NULLIF(COUNT(1), 0), 3) AS stockout_rate,\n",
+          "       SUM(stockout_flag) AS stockout_days\n",
+          "FROM dante_classic_stable_catalog.tempo_scan_supply_chain.fact_inventory\n",
+          "WHERE to_date(reading_date) >= date_sub(current_date(), 30)\n",
+          "GROUP BY region ORDER BY stockout_rate DESC"
+        ]
+      },
+      {
+        "id": "20000000000000000000000000000003",
+        "question": [
+          "Revenue at risk from stockouts by division in the last 30 days"
+        ],
+        "sql": [
+          "SELECT division,\n",
+          "       SUM(CASE WHEN status IN ('backorder','partial','cancelled') THEN net_idr ELSE 0 END) AS revenue_at_risk_idr,\n",
+          "       SUM(net_idr) AS net_revenue_idr\n",
+          "FROM dante_classic_stable_catalog.tempo_scan_supply_chain.fact_sales\n",
+          "WHERE to_date(order_ts) >= date_sub(current_date(), 30)\n",
+          "GROUP BY division ORDER BY revenue_at_risk_idr DESC"
+        ]
+      },
+      {
+        "id": "20000000000000000000000000000004",
+        "question": [
+          "SKUs at risk of expiry"
+        ],
+        "sql": [
+          "SELECT i.dc_id, i.product_id, p.product_name, i.brand, i.division,\n",
+          "       MAX(i.expiry_risk_score) AS expiry_risk_score,\n",
+          "       MIN(i.days_to_expiry) AS days_to_expiry,\n",
+          "       SUM(i.at_risk_expiry_units) AS at_risk_units\n",
+          "FROM dante_classic_stable_catalog.tempo_scan_supply_chain.fact_inventory i\n",
+          "JOIN dante_classic_stable_catalog.tempo_scan_supply_chain.dim_product p ON i.product_id = p.product_id\n",
+          "WHERE i.reading_date = (SELECT MAX(reading_date) FROM dante_classic_stable_catalog.tempo_scan_supply_chain.fact_inventory)\n",
+          "  AND i.expiry_risk_score > 0.7\n",
+          "GROUP BY i.dc_id, i.product_id, p.product_name, i.brand, i.division\n",
+          "ORDER BY expiry_risk_score DESC LIMIT 20"
+        ]
+      },
+      {
+        "id": "20000000000000000000000000000005",
+        "question": [
+          "Fill rate for OTC products in Jawa"
+        ],
+        "sql": [
+          "SELECT brand,\n",
+          "       ROUND(SUM(units_fulfilled) * 1.0 / NULLIF(SUM(units_ordered), 0), 3) AS fill_rate,\n",
+          "       SUM(units_ordered) AS units_ordered\n",
+          "FROM dante_classic_stable_catalog.tempo_scan_supply_chain.fact_sales\n",
+          "WHERE region = 'Jawa' AND division = 'Pharma-OTC'\n",
+          "  AND to_date(order_ts) >= date_sub(current_date(), 30)\n",
+          "GROUP BY brand ORDER BY units_ordered DESC"
+        ]
+      },
+      {
+        "id": "20000000000000000000000000000006",
+        "question": [
+          "Demand by brand for OTC analgesics in Jawa and Sumatera during the recent window"
+        ],
+        "sql": [
+          "SELECT region, brand,\n",
+          "       SUM(units_ordered) AS units_ordered,\n",
+          "       SUM(net_idr) AS net_revenue_idr\n",
+          "FROM dante_classic_stable_catalog.tempo_scan_supply_chain.fact_sales\n",
+          "WHERE division = 'Pharma-OTC'\n",
+          "  AND region IN ('Jawa','Sumatera')\n",
+          "  AND brand IN ('Bodrex','Oskadon','Bodrexin','Hemaviton')\n",
+          "  AND to_date(order_ts) >= date_sub(current_date(), 30)\n",
+          "GROUP BY region, brand ORDER BY units_ordered DESC"
+        ]
+      }
+    ],
+    "text_instructions": [
+      {
+        "id": "30000000000000000000000000000001",
+        "content": [
+          "You are the Tempo Scan supply-chain data assistant for PT Tempo Scan Group (pharma + consumer-health) in Indonesia. Answer in the language the user asks in \u2014 English or Bahasa Indonesia. All data is synthetic.\n",
+          "TABLES: fact_sales is the main sell-through fact (one row per outlet order) with columns product_id, outlet_id, dc_id, account_id, region, province, city, division, brand, category, order_ts, ship_ts, units_ordered, units_fulfilled, unit_price_idr, gross_idr, discount_idr, net_idr, channel, promo_flag, status. fact_inventory is DC x product x day with on_hand_units, in_transit_units, reserved_units, days_of_supply, reorder_point, batch_expiry_date, days_to_expiry, at_risk_expiry_units, avg_daily_demand, stockout_flag (0/1), expiry_risk_score (0..1). dim_product maps product_id -> product_name, brand, division, category, therapeutic_class, pack_size, shelf_life_days, requires_cold_chain, bpom_reg_no, unit_cost_idr, unit_price_idr. dim_distribution_center maps dc_id -> dc_name, city, province, region, lat, lng, capacity_units, cold_chain_capable. dim_outlet maps outlet_id -> outlet_name, outlet_type, chain, city, province, region, dc_id, tier.\n",
+          "JOINS: fact_sales.product_id = dim_product.product_id; fact_sales.dc_id / fact_inventory.dc_id = dim_distribution_center.dc_id; fact_sales.outlet_id = dim_outlet.outlet_id; fact_inventory.product_id = dim_product.product_id. Do NOT join to dim_account for names/contact details \u2014 that PII table is out of scope for this assistant.\n",
+          "BUSINESS DEFINITIONS: all monetary amounts are in Indonesian Rupiah (IDR); label revenue as IDR. Regions are Indonesian island groups: Jawa (dominant), Sumatera, Kalimantan, Sulawesi, Bali-Nusra. Divisions are exactly Pharma-Rx, Pharma-OTC, Consumer-Health, Personal-Care. fact_sales.status values are exactly 'fulfilled', 'partial', 'backorder', 'cancelled'. A stockout order is status IN ('backorder','partial'). Real Tempo Scan brands (synthetic data): OTC/pharma \u2014 Bodrex, Bodrexin, Oskadon, NEO Rheumason, Hemaviton, Contrexyn, Nonflamin; consumer/personal-care \u2014 Marina, My Baby, Vitalis, Claudia, Total Care, S.O.S, Revlon.\n",
+          "METRICS: Fill rate = SUM(units_fulfilled) / SUM(units_ordered). Stockout rate (inventory) = SUM(stockout_flag) / COUNT(*) over fact_inventory. Stockout order rate (sales) = orders with status backorder or partial / all orders. Revenue at risk = SUM(net_idr) for orders with status backorder, partial or cancelled. Expiry write-off risk: a SKU x DC is at risk when expiry_risk_score > 0.7; at_risk_expiry_units quantifies exposed units. For 'currently' / 'latest' inventory questions use the most recent reading_date: reading_date = (SELECT MAX(reading_date) FROM fact_inventory).\n",
+          "SYNONYMS: 'sell-through' / 'penjualan' / 'demand' -> fact_sales units and net_idr; 'fill rate' / 'tingkat pemenuhan' -> fill rate metric; 'stockout' / 'kehabisan stok' / 'out of stock' -> stockout_flag or backorder/partial status; 'revenue at risk' / 'pendapatan berisiko' -> revenue-at-risk metric; 'expiry' / 'kedaluwarsa' / 'write-off' -> expiry_risk_score / at_risk_expiry_units; 'DC' / 'gudang' / 'pusat distribusi' -> dim_distribution_center; 'outlet' / 'apotek' / 'toko' -> dim_outlet; 'OTC' -> division 'Pharma-OTC'; 'Rx' / 'resep' -> division 'Pharma-Rx'.\n",
+          "CONTEXT: In the most recent ~30 days a seasonal flu-season demand surge in OTC analgesics / cough-cold brands (Bodrex, Oskadon, Bodrexin, Hemaviton) has hit Jawa and Sumatera, pushing status toward backorder/partial and spiking stockout_flag (about 1 in 4 high-demand SKU-days) \u2014 this drives lost revenue and is the key operational issue to surface. Separately, roughly 12% of short-shelf-life SKUs that are over-stocked in specific DCs are trending toward expiry write-off (expiry_risk_score climbing past 0.7).\n",
+          "STYLE: default to the last 30 days when the user says 'recent' / 'terbaru' or gives no period. Prefer clear aggregates, always label monetary values as IDR, and round rates to 3 decimals or show as percentages."
+        ]
+      }
+    ]
+  }
+}
