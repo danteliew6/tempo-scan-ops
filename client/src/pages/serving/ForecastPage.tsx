@@ -1,5 +1,4 @@
 import {
-  useServingInvoke,
   LineChart,
   BarChart,
   Card,
@@ -47,18 +46,6 @@ const FEATURES = [
   { key: 'shelf_life_days', label: 'Shelf Life (days)', def: 180, risk: (v: number) => (v <= 120 ? 2 : v <= 270 ? 1 : 0) },
 ] as const;
 
-function extractRisk(data: unknown): number | null {
-  const preds = (data as { predictions?: unknown })?.predictions;
-  if (!Array.isArray(preds) || preds.length === 0) return null;
-  const first: unknown = preds[0];
-  if (typeof first === 'number') return first;
-  if (first && typeof first === 'object' && 'expiry_risk_score' in first) {
-    const v = (first as { expiry_risk_score: unknown }).expiry_risk_score;
-    return typeof v === 'number' ? v : Number(v);
-  }
-  return null;
-}
-
 function severity(risk: number) {
   if (risk >= 0.85) return { label: 'Critical', bar: 'bg-red-600', text: 'text-red-600' };
   if (risk >= 0.6) return { label: 'High', bar: 'bg-orange-500', text: 'text-orange-600' };
@@ -73,14 +60,22 @@ function WhatIf() {
   const [vals, setVals] = useState<Record<string, number>>(
     Object.fromEntries(FEATURES.map((f) => [f.key, f.def])),
   );
-  const { invoke, loading, error } = useServingInvoke({});
   const [risk, setRisk] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
 
+  // The served model endpoint is unavailable on this workspace (the UC metastore is
+  // at its registered-model quota), so we score with a transparent on-device heuristic
+  // over the same features. Clearly labeled below so it's never mistaken for the model.
   function run() {
-    void invoke({ dataframe_records: [vals] }).then((res) => {
-      const r = extractRisk(res);
-      if (r !== null) setRisk(r);
-    });
+    setLoading(true);
+    const levels = FEATURES.map((f) => f.risk(vals[f.key]));
+    const score = levels.reduce((a, b) => a + b, 0) / (2 * FEATURES.length);
+    // gentle non-linearity so mid inputs read as moderate, extremes as critical
+    const r = Math.max(0, Math.min(1, Math.pow(score, 0.85)));
+    window.setTimeout(() => {
+      setRisk(r);
+      setLoading(false);
+    }, 250);
   }
 
   const sev = risk !== null ? severity(risk) : null;
@@ -93,8 +88,11 @@ function WhatIf() {
       </CardHeader>
       <CardContent className="space-y-5">
         <p className="text-xs text-muted-foreground">
-          Scores a single SKU×DC inventory reading against the served model (endpoint{' '}
-          <code>tempo-demand-forecast</code>) — returns the probability the batch trends to expiry write-off.
+          Scores a single SKU×DC inventory reading for the probability the batch trends to expiry
+          write-off. <span className="text-amber-600">On-device heuristic estimate</span> — the served
+          model endpoint (<code>tempo-demand-forecast</code>) is not deployed on this workspace (its Unity
+          Catalog metastore is at the registered-model quota); the trained model + <code>gold_product_risk</code>
+          scores still power the worklist above.
         </p>
 
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
@@ -114,7 +112,6 @@ function WhatIf() {
         </div>
 
         <Button onClick={run} disabled={loading}>{loading ? 'Scoring…' : 'Predict expiry risk'}</Button>
-        {error && <div className="text-destructive text-sm">Error: {error}</div>}
 
         {risk !== null && sev && (
           <div className="rounded-lg border bg-muted/30 p-4 space-y-3">

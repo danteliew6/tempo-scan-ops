@@ -125,7 +125,7 @@ createApp({
         SELECT to_char(sales_date, 'YYYY-MM-DD')                      AS sales_date,
                ROUND((net_idr/1e9)::numeric, 3)::float8               AS revenue_bn_idr,
                ROUND((revenue_at_risk_idr/1e6)::numeric, 1)::float8   AS revenue_at_risk_m_idr,
-               demand_units::bigint                                   AS demand_units,
+               demand_units::int                                      AS demand_units,
                ROUND(fill_rate::numeric, 4)::float8                   AS fill_rate,
                ROUND(stockout_rate::numeric, 4)::float8               AS stockout_rate,
                backorder_count::int                                   AS backorder_count
@@ -143,7 +143,7 @@ createApp({
         )
         SELECT g.region,
                to_char(g.sales_date, 'YYYY-MM-DD')                    AS sales_date,
-               g.demand_units::bigint                                 AS demand_units,
+               g.demand_units::int                                    AS demand_units,
                ROUND(g.fill_rate::numeric, 4)::float8                 AS fill_rate,
                ROUND(g.stockout_rate::numeric, 4)::float8             AS stockout_rate,
                ROUND((g.revenue_at_risk_idr/1e6)::numeric, 1)::float8 AS revenue_at_risk_m_idr,
@@ -156,7 +156,7 @@ createApp({
       lbGet('/api/lakebase/region-trend', `
         SELECT region,
                to_char(sales_date, 'YYYY-MM-DD') AS sales_date,
-               demand_units::bigint              AS demand_units
+               demand_units::int                 AS demand_units
         FROM public.gold_region_daily
         WHERE sales_date >= (SELECT MAX(sales_date) - INTERVAL '30 days' FROM public.gold_region_daily)
         ORDER BY region, sales_date`);

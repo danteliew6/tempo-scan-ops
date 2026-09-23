@@ -31,6 +31,13 @@ _SPARK_TO_PG = {
 }
 
 
+def _pg_type(spark_type: str) -> str:
+    """Map a Spark simpleString dtype to a Postgres type (handles decimal(p,s))."""
+    if spark_type.startswith("decimal"):
+        return "numeric" + spark_type[len("decimal"):]  # decimal(15,4) -> numeric(15,4)
+    return _SPARK_TO_PG.get(spark_type, "text")
+
+
 def _db(*args):
     return subprocess.check_output(["databricks", *args, "-p", PROFILE, "-o", "json"]).decode()
 
@@ -50,7 +57,7 @@ def main():
     spark = get_spark()
     for tbl in SERVING_TABLES:
         df = spark.table(fq(tbl))
-        cols = [(f.name, _SPARK_TO_PG.get(f.dataType.simpleString(), "text")) for f in df.schema.fields]
+        cols = [(f.name, _pg_type(f.dataType.simpleString())) for f in df.schema.fields]
         ddl_cols = ", ".join(f'"{n}" {t}' for n, t in cols)
         pdf = df.toPandas()
         fd, path = tempfile.mkstemp(suffix=".csv")
