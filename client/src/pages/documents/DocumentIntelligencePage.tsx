@@ -73,14 +73,21 @@ const norm = (s: string) =>
     .replace(/[\s,.:；;/\\—–-]+/g, '')
     .trim();
 
-function parseElements(json: string | undefined | null): ParsedElement[] {
-  if (!json) return [];
-  try {
-    const arr = JSON.parse(json) as ParsedElement[];
-    return Array.isArray(arr) ? arr.filter((e) => Array.isArray(e.coord) && e.coord.length === 4) : [];
-  } catch {
-    return [];
+function parseElements(raw: unknown): ParsedElement[] {
+  if (!raw) return [];
+  // The analytics layer auto-parses JSON-string columns, so elements_json arrives as an
+  // array at runtime (though typed STRING). Handle both an array and a raw JSON string.
+  let arr: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      arr = JSON.parse(raw);
+    } catch {
+      return [];
+    }
   }
+  return Array.isArray(arr)
+    ? (arr as ParsedElement[]).filter((e) => Array.isArray(e.coord) && e.coord.length === 4)
+    : [];
 }
 
 export function DocumentIntelligencePage() {
