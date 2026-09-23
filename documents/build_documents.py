@@ -1,20 +1,34 @@
 """Document Intelligence source — generate sample Tempo Scan documents, parse them
 with ai_parse_document, and land ts_parsed_documents for the app's /documents page.
 
-This is the OCR "backpocket wow": the app's `documents_extracted.sql` runs ai_extract
-LIVE on top of `parsed_text`, so all this stage has to do is produce genuinely-parsed
-text from real generated documents (no faked content).
+This backs the /documents viewer: the app shows the ACTUAL rasterized document page
+with bounding-box overlays for every parsed element, next to the structured fields
+that `documents_extracted.sql` pulls LIVE with ai_extract. So this stage produces,
+per document, three things that make the viewer work:
+  - parsed_text   : plain text (concat of element contents) — for the text panel
+  - elements_json : JSON array of {id, type, content, coord:[x0,y0,x1,y1], page_id}
+                    from ai_parse_document — for the bounding-box overlays
+  - image_base64  : the PDF's first page rasterized to PNG at 150 DPI (base64) plus
+                    page_width / page_height — the backdrop the boxes are drawn on
+
+Coordinate space: ai_parse_document returns element bboxes in its internal render
+space (A4 @ ~150 DPI ≈ 1240x1754 px, top-left origin). We rasterize the same page at
+150 DPI so the image pixel space matches those coords; the UI then positions each box
+as a percentage (coord / page_width) so it scales to any display size.
 
 Flow (runs as a serverless spark_python_task in the DABs bootstrap job, or locally via
 Databricks Connect):
   1. CREATE VOLUME <schema>.raw_documents
-  2. generate ~12 sample PDFs (invoices / purchase orders / COAs / BPOM filings) with
-     realistic Tempo Scan pharma-distribution content, written into the volume
-  3. ai_parse_document(content, map('version','2.0')) over the volume → text
-  4. write ts_parsed_documents(doc_id, doc_type, file_name, parsed_text, volume_path, parsed_at)
+  2. generate ~12 sample PDFs into the volume (best-effort — the volume FUSE mount is
+     only writable on Databricks compute; locally we reuse the PDFs already there)
+  3. ai_parse_document(content, map('version','2.0')) over the volume → text + elements
+  4. rasterize each PDF's first page to PNG @150 DPI (PyMuPDF) → base64 + page dims
+  5. write ts_parsed_documents(doc_id, doc_type, file_name, parsed_text, elements_json,
+     image_base64, page_width, page_height, volume_path, parsed_at)
 
 Requires DBR 17.3+ for ai_parse_document (serverless env version that includes it).
 """
+import base64
 import os
 import subprocess
 import sys
@@ -182,12 +196,13 @@ _DOCS = [
 ]
 
 
-def _ensure_reportlab():
+def _ensure_pkg(import_name, pip_name=None):
     try:
-        import reportlab  # noqa: F401
+        __import__(import_name)
     except ImportError:
-        print("[docs] installing reportlab ...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "reportlab"])
+        pip_name = pip_name or import_name
+        print(f"[docs] installing {pip_name} ...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", pip_name])
 
 
 def _write_pdf(path, title, rows, footer):
@@ -220,6 +235,41 @@ def _write_pdf(path, title, rows, footer):
     c.save()
 
 
+def _rasterize_pages(spark):
+    """Read each PDF from the volume, rasterize its first page to a 150-DPI PNG, and
+    return a Spark DataFrame [file_name, image_base64, page_width, page_height].
+
+    Works on Databricks compute and locally via Databricks Connect: we pull the raw
+    file bytes through Spark's binaryFile reader (so no FUSE mount is required) and run
+    PyMuPDF on the driver. 150 DPI keeps the pixel space aligned to ai_parse's bbox
+    coords, so the UI can map coord/page_width -> percent for overlays.
+    """
+    _ensure_pkg("pymupdf")
+    import pymupdf  # PyMuPDF (the modern module name; `fitz` alias is deprecated)
+
+    file_rows = (
+        spark.read.format("binaryFile").load(VOL_DIR).select("path", "content").collect()
+    )
+    out = []
+    for r in file_rows:
+        file_name = r["path"].rsplit("/", 1)[-1]
+        if not file_name.lower().endswith(".pdf"):
+            continue
+        try:
+            doc = pymupdf.open(stream=bytes(r["content"]), filetype="pdf")
+            page = doc.load_page(0)
+            pix = page.get_pixmap(dpi=150)
+            b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
+            out.append((file_name, b64, int(pix.width), int(pix.height)))
+            doc.close()
+        except Exception as e:  # noqa: BLE001 — one bad PDF shouldn't kill the batch
+            print(f"[docs] WARN rasterize failed for {file_name}: {e}")
+    print(f"[docs] rasterized {len(out)} page images @150 DPI")
+    return spark.createDataFrame(
+        out, schema="file_name STRING, image_base64 STRING, page_width INT, page_height INT"
+    )
+
+
 def main():
     spark = get_spark()
 
@@ -228,11 +278,16 @@ def main():
               f"COMMENT 'Sample Tempo Scan documents for ai_parse_document (synthetic).'")
     print(f"[docs] volume ready: {VOL_DIR}")
 
-    # 2. generate PDFs into the volume (FUSE write)
-    _ensure_reportlab()
-    for file_name, _doc_type, title, rows, footer in _DOCS:
-        _write_pdf(os.path.join(VOL_DIR, file_name), title, rows, footer)
-    print(f"[docs] wrote {len(_DOCS)} sample PDFs to volume")
+    # 2. generate PDFs into the volume — best-effort. The volume FUSE mount is writable
+    #    on Databricks compute; running locally via Databricks Connect it is not, so we
+    #    fall back to the PDFs already present in the volume.
+    try:
+        _ensure_pkg("reportlab")
+        for file_name, _doc_type, title, rows, footer in _DOCS:
+            _write_pdf(os.path.join(VOL_DIR, file_name), title, rows, footer)
+        print(f"[docs] wrote {len(_DOCS)} sample PDFs to volume")
+    except Exception as e:  # noqa: BLE001
+        print(f"[docs] skip PDF generation (using existing volume PDFs): {e}")
 
     # doc_type lookup so we don't rely on the classifier for the known set
     type_map = {fn: dt for (fn, dt, *_rest) in _DOCS}
@@ -240,9 +295,11 @@ def main():
         f"WHEN '{fn}' THEN '{dt}'" for fn, dt in type_map.items()
     )
 
-    # 3. parse + 4. land ts_parsed_documents
-    sql = f"""
-    CREATE OR REPLACE TABLE {fq('ts_parsed_documents')} AS
+    # 3. parse -> staging temp view (parsed_text + elements_json with bbox coords)
+    #    elements_json: JSON array of {id, type, content, coord:[x0,y0,x1,y1], page_id}
+    #    from the first bbox of each element (all our sample docs are single-page).
+    spark.sql(f"""
+    CREATE OR REPLACE TEMP VIEW _ts_parsed_stg AS
     WITH parsed AS (
       SELECT
         regexp_extract(path, '([^/]+)$', 1)                                   AS file_name,
@@ -254,16 +311,38 @@ def main():
       CASE file_name {type_case} ELSE 'other' END                            AS doc_type,
       file_name,
       concat_ws('\\n', transform(variant_get(doc, '$.document.elements', 'ARRAY<VARIANT>'), e -> e:content::STRING)) AS parsed_text,
+      to_json(transform(
+        variant_get(doc, '$.document.elements', 'ARRAY<VARIANT>'),
+        e -> named_struct(
+          'id',      e:id::STRING,
+          'type',    e:type::STRING,
+          'content', e:content::STRING,
+          'coord',   from_json(to_json(e:bbox[0]:coord), 'ARRAY<DOUBLE>'),
+          'page_id', e:bbox[0]:page_id::INT
+        )
+      ))                                                                       AS elements_json,
       concat('{VOL_DIR}/', file_name)                                         AS volume_path,
       current_timestamp()                                                     AS parsed_at
     FROM parsed
     -- On success ai_parse_document sets error_status to JSON null, which is NOT SQL NULL
     -- (a VARIANT holding json-null). Match both so successful parses are kept.
     WHERE doc:error_status IS NULL OR to_json(doc:error_status) = 'null'
-    """
-    spark.sql(sql)
+    """)
+
+    # 4. rasterize the document pages -> temp view keyed by file_name
+    _rasterize_pages(spark).createOrReplaceTempView("_ts_doc_images")
+
+    # 5. land ts_parsed_documents (parsed text + elements + page image + dims)
+    spark.sql(f"""
+    CREATE OR REPLACE TABLE {fq('ts_parsed_documents')} AS
+    SELECT s.doc_id, s.doc_type, s.file_name, s.parsed_text, s.elements_json,
+           i.image_base64, i.page_width, i.page_height,
+           s.volume_path, s.parsed_at
+    FROM _ts_parsed_stg s
+    LEFT JOIN _ts_doc_images i USING (file_name)
+    """)
     n = spark.table(fq("ts_parsed_documents")).count()
-    print(f"[docs] ts_parsed_documents: {n} rows parsed")
+    print(f"[docs] ts_parsed_documents: {n} rows parsed (with elements + page images)")
 
 
 if __name__ == "__main__":

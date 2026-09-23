@@ -101,5 +101,30 @@ declare module "@databricks/appkit-ui/react" {
           product_name: string;
         }>;
       };
+    document_page: {
+        name: "document_page";
+        parameters: {
+          /** STRING - use sql.string() */
+          doc_id: SQLStringMarker;
+        };
+        result: Array<{
+          /** @sqlType STRING */
+          doc_id: string;
+          /** @sqlType STRING */
+          doc_type: string;
+          /** @sqlType STRING */
+          file_name: string;
+          /** @sqlType STRING */
+          parsed_text: string;
+          /** @sqlType STRING - JSON array of {id,type,content,coord,page_id} */
+          elements_json: string;
+          /** @sqlType STRING - base64 PNG of the page @150 DPI */
+          image_base64: string;
+          /** @sqlType INT */
+          page_width: number;
+          /** @sqlType INT */
+          page_height: number;
+        }>;
+      };
   }
 }

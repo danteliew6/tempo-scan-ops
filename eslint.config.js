@@ -19,6 +19,7 @@ export default tseslint.config(
       'tests/**',
       '**/.smoke-test/**',
       '**/appkit-types/**',
+      '**/.claude/**',
     ],
   },
 

@@ -31,10 +31,24 @@ const GENIE_URL = `${WORKSPACE_HOST}/genie/rooms/${GENIE_SPACE_ID}?o=${WORKSPACE
 type Mode = 'native' | 'embedded';
 
 export function AskTempoPage() {
-  const { messages, status, sendMessage, reset } = useGenieChat({ alias: 'default' });
+  const { messages, status, sendMessage, reset, error } = useGenieChat({ alias: 'default' });
   const busy = status === 'streaming' || status === 'loading-history';
   const empty = messages.length === 0;
   const [mode, setMode] = useState<Mode>('native');
+
+  // Genie OBO auth: the app requests the user-authorization scopes (dashboards.genie, sql).
+  // A session that consented BEFORE those scopes were added carries a stale token and the
+  // Genie call fails with "Invalid scope, required scopes: genie". We detect that here and
+  // degrade gracefully — offer the embedded room (which uses the user's direct workspace
+  // session, no OBO) and a one-click re-authorize (reload re-runs consent with the new scopes).
+  const lastMsgError = [...messages].reverse().find((m) => m.error)?.error ?? '';
+  const errText = `${error ?? ''} ${lastMsgError}`.trim();
+  const isScopeError = status === 'error' && /scope|consent|authoriz|forbidden|permission|denied/i.test(errText);
+  const reauthorize = () => {
+    // Force the Databricks Apps OAuth/OBO flow to re-run so the fresh token includes the
+    // genie scope the app now declares.
+    window.location.reload();
+  };
 
   // Deep-link: /ask?q=... (e.g. from a Command Center alert) auto-asks the question once.
   const [searchParams, setSearchParams] = useSearchParams();
@@ -132,11 +146,35 @@ export function AskTempoPage() {
             </div>
           </div>
 
-          {status === 'error' && (
+          {isScopeError ? (
             <Alert variant="destructive">
-              <AlertDescription className="text-xs">Something went wrong reaching Genie. Try rephrasing or start a new chat.</AlertDescription>
+              <AlertDescription className="text-xs space-y-2">
+                <div>
+                  <strong>Authorization needed for Genie.</strong> Your session was authorized before the
+                  Genie permission was granted, so this chat can&apos;t reach the space yet. Re-authorize to
+                  refresh your access, or use the embedded Databricks Genie room (it uses your direct
+                  workspace sign-in).
+                </div>
+                <div className="flex flex-wrap gap-2 pt-0.5">
+                  <Button size="sm" variant="secondary" onClick={reauthorize} className="gap-1">
+                    <RotateCcw className="h-3.5 w-3.5" /> Reload to re-authorize
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setMode('embedded')} className="gap-1">
+                    <Sparkles className="h-3.5 w-3.5" /> Use embedded Genie
+                  </Button>
+                </div>
+              </AlertDescription>
             </Alert>
-          )}
+          ) : status === 'error' ? (
+            <Alert variant="destructive">
+              <AlertDescription className="text-xs">
+                Something went wrong reaching Genie. Try rephrasing, start a new chat, or{' '}
+                <button onClick={() => setMode('embedded')} className="underline underline-offset-2 font-medium">
+                  open the embedded Genie room
+                </button>.
+              </AlertDescription>
+            </Alert>
+          ) : null}
 
           <Alert>
             <AlertDescription className="text-xs">
