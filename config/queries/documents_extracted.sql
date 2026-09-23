@@ -12,13 +12,15 @@ SELECT
   d.doc_type,
   d.file_name,
   d.parsed_text,
-  d.fields:vendor_name::string      AS vendor_name,
-  d.fields:document_number::string  AS document_number,
-  d.fields:document_date::string    AS document_date,
-  d.fields:total_amount_idr::string AS total_amount_idr,
-  d.fields:currency::string         AS currency,
-  d.fields:bpom_reg_no::string      AS bpom_reg_no,
-  d.fields:product_name::string     AS product_name
+  -- ai_extract(text, array(...)) returns a STRUCT with these fields (each STRING),
+  -- so use struct dot-access (.field), not variant colon-access (:field).
+  d.fields.vendor_name      AS vendor_name,
+  d.fields.document_number  AS document_number,
+  d.fields.document_date    AS document_date,
+  d.fields.total_amount_idr AS total_amount_idr,
+  d.fields.currency         AS currency,
+  d.fields.bpom_reg_no      AS bpom_reg_no,
+  d.fields.product_name     AS product_name
 FROM (
   SELECT
     doc_id, doc_type, file_name, parsed_text,

@@ -3,9 +3,10 @@ resources:
     tempo_ops:
       name: tempo-scan-ops
       description: "Tempo Scan supply-chain operations — whitelabeled AppKit control center (Molecule to Shelf)"
-      # Deploy from the bundle-synced workspace files (no external git dependency).
-      # The bundle root (one level up from resources/) is the app source directory.
-      source_code_path: ../
+      # This workspace enforces Git-backed app deploys, so the source is a Databricks
+      # Git folder cloned from github.com/danteliew6/tempo-scan-ops (created via
+      # `databricks repos create`). Pull the folder to update, then redeploy.
+      source_code_path: /Workspace/Users/dante.liew@databricks.com/tempo-scan-ops-app
       user_api_scopes:
         - dashboards.genie
         - serving.serving-endpoints
